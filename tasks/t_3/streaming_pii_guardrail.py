@@ -15,18 +15,42 @@ class PresidioStreamingPIIGuardrail:
         #TODO:
         # 1. Create dict with language configurations: {"nlp_engine_name": "spacy","models": [{"lang_code": "en", "model_name": "en_core_web_sm"}]}
         #    Read more about it here: https://microsoft.github.io/presidio/tutorial/05_languages/
+        language_configs = {
+            "nlp_engine_name": "spacy",
+            "models": [
+                {
+                    "lang_code": "en",
+                    "model_name": "en_core_web_sm"
+                }
+            ]
+        }
+
         # 2. Create NlpEngineProvider with created configurations
+        nlp_engine_provider = NlpEngineProvider(nlp_configuration=language_configs)
+
         # 3. Create AnalyzerEngine, as `nlp_engine` crate engine by crated provider (will be used as obj var later)
+        self.analyzer = AnalyzerEngine(nlp_engine=nlp_engine_provider.create_engine())
+
         # 4. Create AnonymizerEngine (will be used as obj var later)
+        self.anonymizer = AnonymizerEngine()
+
         # 5. Create buffer as empty string (here we will accumulate chunks content and process it, will be used as obj var late)
+        self.buffer = ""
+
         # 6. Create buffer_size as `buffer_size` (will be used as obj var late)
+        self.buffer_size = buffer_size
+
         # 7. Create safety_margin as `safety_margin` (will be used as obj var late)
-        raise NotImplementedError
+        self.safety_margin = safety_margin
 
     def process_chunk(self, chunk: str) -> str:
         #TODO:
         # 1. Check if chunk is present, if not then return chunk itself
+        if not chunk:
+            return chunk
+        
         # 2. Accumulate chunk to `buffer`
+        self.buffer += chunk
 
         if len(self.buffer) > self.buffer_size:
             safe_length = len(self.buffer) - self.safety_margin
@@ -39,23 +63,32 @@ class PresidioStreamingPIIGuardrail:
 
             #TODO:
             # 1. Get results with analyzer by method analyze, text is `text_to_process`, language is 'en'
+            results = self.analyzer.analyze(text=text_to_process, language='en')
             # 2. Anonymize content, use anonymizer method anonymize with such params:
             #       - text=text_to_process
             #       - analyzer_results=results
+            anonymized_result = self.anonymizer.anonymize(text=text_to_process, analyzer_results=results)
             # 3. Set `buffer` as `buffer[safe_length:]`
+            self.buffer =  self.buffer[safe_length:]
             # 4. Return anonymized text
-            raise NotImplementedError
+            return anonymized_result.text
 
         return ""
 
     def finalize(self) -> str:
         #TODO:
         # 1. Check if `buffer` is present, otherwise return empty string
+        if not self.buffer:
+            return ""
+            
         # 2. Analyze `buffer`
+        results = self.analyzer.analyze(text=self.buffer, language='en')
         # 3. Anonymize `buffer` with analyzed results
+        anonymized_result = self.anonymizer.anonymize(text=self.buffer, analyzer_results=results)
         # 4. Set `buffer` as empty string
+        self.buffer = ""
         # 5. Return anonymized text
-        raise NotImplementedError
+        return anonymized_result.text
 
 
 class StreamingPIIGuardrail:
@@ -81,6 +114,10 @@ class StreamingPIIGuardrail:
             'credit_card': (
                 r'\b(?:\d{4}[-\s]?){3}\d{4}\b|\b\d{13,19}\b',
                 '[REDACTED-CREDIT-CARD]'
+            ),
+            'credit_card_expiry': (
+                r'\b(0[1-9]|1[0-2])\/?([0-9]{2}|[0-9]{4})\b',
+                '[REDACTED-EXPIRY]'
             ),
             'license': (
                 r'\b[A-Z]{2}-DL-[A-Z0-9]+\b',
@@ -109,6 +146,14 @@ class StreamingPIIGuardrail:
             'currency': (
                 r'\$[\d,]+\.?\d*',
                 '[REDACTED-AMOUNT]'
+            ),
+            'phone': (
+                r'\b(?:\+?1[-.\s]?|0)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
+                '[REDACTED-PHONE]'
+            ),
+            'email': (
+                r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+                '[REDACTED-EMAIL]'
             )
         }
 
@@ -194,14 +239,59 @@ PROFILE = """
 
 #TODO:
 # Create AzureChatOpenAI client, model to use `gpt-4.1-nano-2025-04-14` (or any other mini or nano models)
+llm = AzureChatOpenAI(
+    deployment_name="gpt-4.1-nano-2025-04-14",
+    azure_endpoint=DIAL_URL,
+    api_key=API_KEY,
+    api_version=""
+)
 
 def main():
     #TODO:
     # 1. Create PresidioStreamingPIIGuardrail or StreamingPIIGuardrail
-    # 2. Create list of messages with system prompt and profile
-    # 3. Create console chat with LLM, preserve history there and while streaming filter content with streaming guardrail
-    raise NotImplementedError()
+    guardrail = StreamingPIIGuardrail()
 
+    # For high-security applications (financial, healthcare)
+    #guardrail = StreamingPIIGuardrail(buffer_size=200, safety_margin=40)
+
+    # For balanced performance (general business)
+    #guardrail = StreamingPIIGuardrail(buffer_size=120, safety_margin=25)
+
+    # For low-latency requirements (chatbots, real-time UIs)
+    #guardrail = StreamingPIIGuardrail(buffer_size=80, safety_margin=15)
+
+    # 2. Create list of messages with system prompt and profile
+    chat_history = [
+        # SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=PROFILE)
+    ]
+    # 3. Create console chat with LLM, preserve history there and while streaming filter content with streaming guardrail
+    while True:
+        user_input = input("User: ")
+        if user_input.lower() in ["exit", "quit"]:
+            break
+
+        chat_history.append(HumanMessage(content=user_input))
+
+        llm_response = llm.stream(chat_history)
+        print("AI: ", end="", flush=True)
+
+        raw_chunks = []
+        for chunk in llm_response:
+            # collect raw chunk content and process with guardrail
+            raw_chunks.append(chunk)
+            redacted_chunk = guardrail.process_chunk(chunk.content)
+            if redacted_chunk:
+                print(redacted_chunk, end="", flush=True)
+        final_redacted = guardrail.finalize()
+        if final_redacted:
+            print(final_redacted, end="", flush=True)
+        print()  # New line after response
+        chat_history.append(AIMessage(content="(response streamed with PII redaction)"))
+
+        # print raw chunks for comparison
+        print("\n[Raw LLM Output]")
+        print("".join([chunk.content for chunk in raw_chunks]))
 
 
 main()
